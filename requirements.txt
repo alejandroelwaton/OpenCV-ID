@@ -1,0 +1,6 @@
+uvicorn
+fastapi
+opencv-python
+opencv-contrib-python
+numpy
+Pillow
