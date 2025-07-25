@@ -1,179 +1,162 @@
-import { useRef, useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export default function LiveRecognizer() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const recognitionInterval = useRef<number | null>(null);
-
+  const [ws, setWs] = useState<WebSocket | null>(null);
   const [streaming, setStreaming] = useState(false);
-  const streamingRef = useRef(false);
-  const [status, setStatus] = useState("Listo para iniciar");
+  const [canvasSize, setCanvasSize] = useState<{ width: number; height: number } | null>(null);
+  const [lastResults, setLastResults] = useState<any[]>([]);
+  const lastSent = useRef<number>(0);
 
-  useEffect(() => {
-    streamingRef.current = streaming;
-  }, [streaming]);
+  const startCameraAndWS = async () => {
+    if (streaming) return;
 
-  const startCamera = async () => {
-    console.log("startCamera() called");
-    setStatus("Pidiendo acceso a cámara...");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      console.log("Cámara OK");
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+
+        videoRef.current.onloadedmetadata = () => {
+          const width = videoRef.current!.videoWidth;
+          const height = videoRef.current!.videoHeight;
+
+          if (canvasRef.current) {
+            canvasRef.current.width = width;
+            canvasRef.current.height = height;
+          }
+
+          setCanvasSize({ width, height });
+          console.log(`Res: ${width}x${height}`);
+        };
+
         await videoRef.current.play();
         setStreaming(true);
-        console.log("Video playing");
-        setStatus("Cámara activa");
-        startRecognitionLoop();
       }
     } catch (err) {
-      console.error("Cannot access resource (camera):", err);
-      setStatus("Error de acceso a cámara");
-    }
-  };
-
-  const captureFrame = async (): Promise<Blob | null> => {
-    if (!videoRef.current || !canvasRef.current) return null;
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    return new Promise((resolve) => {
-      canvas.toBlob((blob) => resolve(blob), "image/jpeg");
-    });
-  };
-
-  const startRecognitionLoop = () => {
-    console.log("👉 startRecognitionLoop() llamado");
-    if (recognitionInterval.current) {
-      console.log("No more loop running");
-      return;
+      console.error("Can't access camera:", err);
     }
 
-    recognitionInterval.current = window.setInterval(async () => {
-      console.log("Loop running");
+    const socket = new WebSocket("wss://3cea49ad045c.ngrok-free.app/liveRecognize");
+    socket.binaryType = "arraybuffer";
 
-      if (!streamingRef.current) {
-        console.log("No streaming (ref), skip");
-        return;
-      }
-
-      setStatus("Capturando frame...");
-      const blob = await captureFrame();
-      if (!blob) {
-        console.log("Cannot capture frame");
-        return;
-      }
-
-      setStatus("Enviando...");
-      console.log("Sending frame...");
-
-      const formData = new FormData();
-      formData.append("file", blob, "frame.jpg");
-
-      try {
-        const res = await fetch("/api/recognize", {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!res.ok) {
-          setStatus(`Error API: ${res.status}`);
-          console.log(`API Error: ${res.status}`);
-          return;
-        }
-
-        const data = await res.json();
-        console.log("API Response:", data);
-
-        drawResults(data.results || []);
-        setStatus(`Detectados: ${data.results?.length || 0}`);
-      } catch (err) {
-        console.error("❌ Error al enviar:", err);
-        setStatus("Error API");
-      }
-    }, 2000);
-  };
-
-  const drawResults = (
-    results: Array<{ rect: [number, number, number, number] }>
-  ) => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    const video = videoRef.current;
-
-    if (!canvas || !ctx || !video) return;
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    ctx.strokeStyle = "lime";
-    ctx.lineWidth = 3;
-
-    results.forEach(({ rect }) => {
-      const [x, y, w, h] = rect;
-      ctx.strokeRect(x, y, w, h);
-    });
-  };
-
-  useEffect(() => {
-    console.log("useEffect mounted");
-    return () => {
-      console.log("Cleanup...");
-      if (recognitionInterval.current) {
-        clearInterval(recognitionInterval.current);
-      }
-      if (videoRef.current?.srcObject) {
-        (videoRef.current.srcObject as MediaStream)
-          .getTracks()
-          .forEach((t) => t.stop());
-      }
+    socket.onopen = () => {
+      console.log("WS connected");
     };
-  }, []);
+
+    socket.onerror = (err) => {
+      console.error("WS ERROR:", err);
+    };
+
+    socket.onclose = () => {
+      console.log("WS closed");
+    };
+
+    socket.onmessage = (event) => {
+      const { results } = JSON.parse(event.data);
+      setLastResults(results || []);
+    };
+
+    setWs(socket);
+  };
+
+  // Dibuja resultados
+  useEffect(() => {
+    if (!canvasRef.current || !canvasSize) return;
+
+    const ctx = canvasRef.current.getContext("2d");
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, canvasSize.width, canvasSize.height);
+
+    lastResults.forEach((face) => {
+      const [x, y, w, h] = face.rect;
+      const color = face.id === "Unknown" ? "red" : "lime";
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, h);
+      ctx.fillStyle = color;
+      ctx.font = "16px sans-serif";
+      ctx.fillText(`ID: ${face.id}`, x, y - 8);
+    });
+  }, [lastResults, canvasSize]);
+
+  // Envía frames cada 500ms
+  useEffect(() => {
+    const sendFrame = () => {
+      if (!videoRef.current || !canvasRef.current || !ws || ws.readyState !== 1 || !canvasSize) {
+        requestAnimationFrame(sendFrame);
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastSent.current < 500) {
+        requestAnimationFrame(sendFrame);
+        return;
+      }
+      lastSent.current = now;
+
+      const ctx = canvasRef.current.getContext("2d");
+      if (!ctx) {
+        requestAnimationFrame(sendFrame);
+        return;
+      }
+
+      ctx.drawImage(videoRef.current, 0, 0, canvasSize.width, canvasSize.height);
+
+      canvasRef.current.toBlob((blob) => {
+        if (blob) {
+          blob.arrayBuffer().then((buf) => {
+            ws.send(buf);
+            console.log(`Frame sent (${buf.byteLength} bytes)`);
+          });
+        }
+        requestAnimationFrame(sendFrame);
+      }, "image/jpeg", 0.7);
+    };
+
+    if (ws && streaming && canvasSize) {
+      sendFrame();
+    }
+  }, [ws, streaming, canvasSize]);
 
   return (
-    <div className="flex flex-col items-center p-4">
+    <div className="p-4 flex flex-col gap-4 max-w-md mx-auto">
+      <h1 className="text-2xl font-bold text-center">Live Recognizer</h1>
+      <p className="text-sm text-gray-600 text-center">
+        Activa tu cámara y comienza a detectar rostros en tiempo real. Ideal para móviles.
+      </p>
+
       <button
-        onClick={startCamera}
-        disabled={streaming}
-        className="mb-4 px-6 py-3 bg-blue-600 text-white rounded"
+        onClick={startCameraAndWS}
+        className="w-full px-4 py-3 rounded bg-gray-800 text-white font-semibold active:scale-95 transition"
       >
-        {streaming ? "Cámara activa" : "Iniciar cámara"}
+        {streaming ? "Reconocimiento Activo" : "Iniciar Reconocimiento"}
       </button>
 
-      <div style={{ position: "relative", maxWidth: "480px", width: "100%" }}>
+      <div className="relative w-full aspect-video border border-gray-300 rounded overflow-hidden">
         <video
           ref={videoRef}
-          style={{ width: "100%" }}
           autoPlay
           muted
           playsInline
+          className="absolute top-0 left-0 w-full h-full object-cover"
         />
-        <canvas
-          ref={canvasRef}
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
-            pointerEvents: "none",
-          }}
-        />
+        {canvasSize && (
+          <canvas
+            ref={canvasRef}
+            width={canvasSize.width}
+            height={canvasSize.height}
+            className="absolute top-0 left-0 w-full h-full"
+          />
+        )}
       </div>
 
-      <p className="mt-4 text-gray-700">{status}</p>
+      <p className="text-xs text-gray-500 text-center">
+        El marco verde indica rostro conocido, rojo indica desconocido.
+      </p>
     </div>
   );
 }

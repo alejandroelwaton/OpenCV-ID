@@ -54,7 +54,7 @@ export default function Recognizer() {
     formData.append("file", blob, "capture.jpg");
 
     try {
-      const res = await fetch("/api/recognize", {
+      const res = await fetch("https://3cea49ad045c.ngrok-free.app/recognize", {
         method: "POST",
         body: formData,
       });
